@@ -1,0 +1,143 @@
+[CENTER][SIZE=7][B]LuminScope[/B][/SIZE]
+[SIZE=5]Find out which plugin is lagging your proxy. In one command.[/SIZE]
+
+[SIZE=4][B]Free · Open source (MIT) · Velocity 3.3+[/B][/SIZE][/CENTER]
+
+[HR][/HR]
+
+[SIZE=6][B]"The server is lagging"[/B][/SIZE]
+
+That sentence can mean at least seven different things:
+
+[LIST]
+[*]The backend's tick loop is slow
+[*]The proxy's garbage collector is pausing
+[*]The link between proxy and backend is slow
+[*]The player's own route is bad
+[*]A plugin is blocking the network threads
+[*]A database call is blocking
+[*]The player's machine is struggling
+[/LIST]
+
+Today you guess. Spark profiles [B]backends[/B]. Plan measures [B]players[/B]. The proxy — the thing every single packet passes through — has had nothing at all.
+
+[HR][/HR]
+
+[SIZE=6][B]Why the proxy is the right place to measure[/B][/SIZE]
+
+Because it is the only component that sees [B]both halves of the round trip at once[/B].
+
+Only your proxy can say:
+
+[QUOTE]This player is 15 ms away from me. But I am 180 ms away from survival-1.[/QUOTE]
+
+That one sentence ends the investigation. No backend profiler and no player-side tool can produce it, because neither of them can see the other side.
+
+[HR][/HR]
+
+[SIZE=6][B]What you actually see[/B][/SIZE]
+
+[CODE]/luminscope
+
+--- LuminScope · Diagnosis ---
+ [!] The proxy's I/O threads are being blocked
+   Tasks are waiting up to 412 ms to run on the proxy's I/O threads
+   (median 6 ms). While that happens, every packet on every backend is queued.
+   The stack sampler caught SomeEconomyPlugin on an I/O thread 14 times,
+   most recently at EconomyStorage.loadBalance:88.
+   -> Start with SomeEconomyPlugin. Something in it is running a blocking
+      call on the network thread - usually a synchronous database or HTTP
+      request that belongs on the scheduler.[/CODE]
+
+[B]Conclusions first, numbers second.[/B] Exporting metrics is the easy half and the less useful one — most operators cannot read a Grafana dashboard and should not have to.
+
+[HR][/HR]
+
+[SIZE=6][B]Name the plugin that is blocking your proxy[/B][/SIZE]
+
+This is the feature people screenshot.
+
+When an event loop stalls, the whole network stalls with it, and the proxy log says nothing. The usual outcome is an operator disabling plugins one at a time over a week.
+
+LuminScope samples the I/O thread stacks the moment a stall happens, finds the topmost frame belonging to a plugin, and maps it back to that plugin's id. One command, one name, done.
+
+Sampling only runs [B]during[/B] a stall, so the cost is paid exactly when it does not matter.
+
+[HR][/HR]
+
+[SIZE=6][B]Everything it measures[/B][/SIZE]
+
+[SIZE=5][B]Event loop scheduling delay[/B][/SIZE]
+The single most useful number on a proxy. A no-op task is submitted to the I/O threads and the wait before it runs is recorded. It is [I]measured[/I], not read off an internal field — so a Velocity update cannot silently break it. If the probe cannot attach, it falls back to scheduler timing, tells you plainly, and keeps working.
+
+[SIZE=5][B]Latency, split three ways[/B][/SIZE]
+Player-to-proxy, proxy-to-backend, and the full server switch broken into connect and total phases.
+
+All in percentiles, never averages. If the median switch is 200 ms and the 99th percentile is eight seconds, one player in a hundred is convinced your network is dead — and the average will cheerfully report "0.3 s, all fine".
+
+[SIZE=5][B]JVM internals[/B][/SIZE]
+Heap, GC pause [I]counts[/I] rather than totals (one 400 ms stop-the-world hurts; four hundred 1 ms pauses do not), thread counts, and off-heap buffer usage. That last one matters because Netty buffer leaks are real and genuinely hard to find: the heap looks fine, the process keeps growing, and nothing in a normal profiler explains it.
+
+[HR][/HR]
+
+[SIZE=6][B]Self-healing (off by default)[/B][/SIZE]
+
+LuminScope can take an unresponsive backend out of the routing rotation and put it back gradually.
+
+It is off by default and deliberately timid when on, because [B]automation that fires at the wrong moment is worse than no automation[/B]. Draining a healthy server over a thirty-second blip turns a non-event into an outage.
+
+[LIST]
+[*]Never drains the last server standing
+[*]Never touches anything on your protected list
+[*]Eases traffic back over a ramp — a server that just recovered has cold caches and an empty pool, and the entire queued population arriving at once is how it dies a second time
+[*]Logs and announces every single action
+[/LIST]
+
+[HR][/HR]
+
+[SIZE=6][B]Commands[/B][/SIZE]
+
+Permission [ICODE]luminscope.admin[/ICODE]. Aliases [ICODE]/lscope[/ICODE], [ICODE]/scope[/ICODE].
+
+[LIST]
+[*][ICODE]/luminscope[/ICODE] — findings: what is wrong and what to try
+[*][ICODE]/luminscope latency[/ICODE] — client, backend and switch percentiles, per server
+[*][ICODE]/luminscope jvm[/ICODE] — heap, GC, threads, off-heap, event loop delay
+[*][ICODE]/luminscope blocking[/ICODE] — which plugins were caught on the I/O threads
+[*][ICODE]/luminscope healing[/ICODE] — rotation status and manual restore
+[*][ICODE]/luminscope reset[/ICODE] — clear counters, start measuring from now
+[*][ICODE]/luminscope reload[/ICODE]
+[/LIST]
+
+[HR][/HR]
+
+[SIZE=6][B]Prometheus and Discord[/B][/SIZE]
+
+OpenMetrics endpoint with optional bearer token, bound to localhost by default. Discord webhook alerts with per-finding cooldowns, because posting the same alert every window guarantees the channel gets muted before anyone fixes anything.
+
+[HR][/HR]
+
+[SIZE=6][B]Overhead[/B][/SIZE]
+
+This is an observability tool. If it slows your proxy down, it has failed.
+
+[LIST]
+[*]Stack sampling runs only during a stall, never on the happy path
+[*]Latency lives in fixed-bucket histograms — a bounds check and an increment, roughly 6 KB each
+[*]Backend pings are asynchronous and reuse the proxy's existing path
+[*]Nothing runs on the I/O threads except the probe task, which is a no-op
+[/LIST]
+
+Under 1% of one core on a 500-player network. Check it yourself with [ICODE]/luminscope jvm[/ICODE] before and after.
+
+[HR][/HR]
+
+[SIZE=6][B]Requirements[/B][/SIZE]
+
+Velocity 3.3.0+, Java 17+. No backend plugin. No shaded dependencies, so nothing to conflict with the rest of your stack.
+
+[SIZE=6][B]Source[/B][/SIZE]
+
+MIT licensed: [URL]https://github.com/lumin-mc/LuminScope[/URL]
+
+Bug reports with console output get fixed quickly. Pull requests get merged.

@@ -1,0 +1,104 @@
+[CENTER][SIZE=7][B]LuminScope[/B][/SIZE]
+[SIZE=5]Stop guessing why your network lags. Ask the proxy.[/SIZE]
+
+[SIZE=4][B]Velocity 3.3+ · Java 17+ · MIT licence · Free, with no paywalled features[/B][/SIZE][/CENTER]
+
+[HR][/HR]
+
+[SIZE=6][B]The one thing only a proxy can tell you[/B][/SIZE]
+
+Your proxy sits between every player and every backend. That makes it the only component on your network that can see [B]both sides of the round trip at the same time[/B].
+
+[QUOTE]This player is 15 ms from the proxy. The proxy is 180 ms from survival-1.[/QUOTE]
+
+That sentence localises the problem instantly. Spark cannot say it — it only sees one backend. Player-side tools cannot say it — they only see their own connection. Nothing else on your network is in a position to say it at all.
+
+[HR][/HR]
+
+[SIZE=6][B]Which plugin is stalling your proxy?[/B][/SIZE]
+
+When a plugin runs a blocking call on the network threads, [B]every player on every backend[/B] feels it, and your logs say nothing. The usual fix is disabling plugins one at a time over a week.
+
+LuminScope samples the I/O thread stacks the moment a stall starts and tells you the plugin's name and the exact line.
+
+[CODE]/luminscope blocking
+
+3 stall(s) sampled.
+ SomeEconomyPlugin  caught 14x at  EconomyStorage.loadBalance:88
+ AnotherPlugin      caught 2x at   WebhookSender.post:41[/CODE]
+
+Sampling runs only while the proxy is already stalled, so it costs nothing when things are healthy.
+
+[HR][/HR]
+
+[SIZE=6][B]It tells you what to do, not just what it saw[/B][/SIZE]
+
+Raw metrics are the easy half. LuminScope runs a few dozen rules over what it collects and writes conclusions in plain sentences:
+
+[LIST]
+[*]High latency on both sides at once → the proxy host's own network or CPU
+[*]Backend RTT high, client RTT normal → the link between proxy and backend
+[*]Client RTT high, everything else fine → player routing, nothing you can fix
+[*]Switches slow but connects fast → backend join work: world loading, database reads
+[*]Event loop stalled with no plugin in the stacks → garbage collection or the host
+[/LIST]
+
+Every finding comes with the next thing to try. Every finding clears with hysteresis, so a metric hovering at the threshold does not spam you every window.
+
+[HR][/HR]
+
+[SIZE=6][B]Measured properly[/B][/SIZE]
+
+[LIST]
+[*][B]Percentiles, never averages.[/B] p50/p95/p99 on everything. If half your switches take 200 ms and one in a hundred takes eight seconds, the average says "0.3 s, all fine" and one player in a hundred thinks you are offline.
+[*][B]GC pause counts, not totals.[/B] One 400 ms stop-the-world hurts. Four hundred 1 ms pauses do not. Totals cannot tell them apart.
+[*][B]Off-heap buffer tracking.[/B] Netty leaks are real and hard to find: heap looks fine, process keeps growing, profilers say nothing.
+[*][B]Event loop delay is measured, not read.[/B] A no-op task is submitted and the wait is timed, so a Velocity update cannot silently break the reading.
+[/LIST]
+
+[HR][/HR]
+
+[SIZE=6][B]Self-healing, if you want it[/B][/SIZE]
+
+Optional and off by default: drain an unresponsive backend from routing, put it back gradually when it recovers.
+
+Deliberately cautious. It will not drain your last remaining server, it respects a protected list, it eases traffic back over a ramp instead of dumping the whole queue onto a server with cold caches, and it announces everything it does.
+
+[B]Automation that fires at the wrong moment is worse than no automation.[/B] That is why this ships off.
+
+[HR][/HR]
+
+[SIZE=6][B]Integrations[/B][/SIZE]
+
+[LIST]
+[*][B]Prometheus / OpenMetrics[/B] endpoint, bearer token supported, localhost-bound by default
+[*][B]Discord webhooks[/B] with per-finding cooldowns
+[/LIST]
+
+[HR][/HR]
+
+[SIZE=6][B]Honest limitations[/B][/SIZE]
+
+[LIST]
+[*][B]No backend MSPT or TPS.[/B] There is no companion plugin. LuminScope will tell you the problem is on a backend; run Spark there to find out what.
+[*][B]Event loop timing may be approximate.[/B] On some Velocity builds the probe cannot reach the real I/O executors. It says so rather than pretending, and falls back to scheduler timing.
+[*][B]Plugin attribution blames the caller.[/B] A plugin calling a library that blocks gets named. That is the right answer — it chose to make that call on that thread.
+[/LIST]
+
+[HR][/HR]
+
+[SIZE=6][B]Overhead[/B][/SIZE]
+
+Under 1% of one core on a 500-player network. Stack sampling only during stalls, fixed-bucket histograms at ~6 KB each, asynchronous pings, nothing on the I/O threads but a no-op probe.
+
+An observability tool that slows down what it observes has failed. Verify it yourself with [ICODE]/luminscope jvm[/ICODE].
+
+[HR][/HR]
+
+[SIZE=6][B]Setup[/B][/SIZE]
+
+Drop the jar in [ICODE]plugins/[/ICODE], start the proxy, run [ICODE]/luminscope[/ICODE]. Nothing to configure.
+
+[SIZE=6][B]Source and support[/B][/SIZE]
+
+[URL]https://github.com/lumin-mc/LuminScope[/URL] — MIT licensed, issues and pull requests welcome.
