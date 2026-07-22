@@ -8,6 +8,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -33,6 +34,16 @@ public final class SpigotUpdateChecker {
     private final int resourceId;
     private final AtomicReference<String> latest = new AtomicReference<>();
 
+    /**
+     * Whether the "you are up to date" line has already been printed.
+     *
+     * <p>An available update is worth repeating on every check, because it is a
+     * nudge. Confirmation that nothing has changed is worth saying exactly once:
+     * printed every six hours it becomes log noise, and log noise is how the
+     * genuinely important line gets scrolled past.
+     */
+    private final AtomicBoolean announcedUpToDate = new AtomicBoolean();
+
     public SpigotUpdateChecker(Logger logger, String pluginName, String currentVersion, int resourceId) {
         this.logger = logger;
         this.pluginName = pluginName;
@@ -43,6 +54,11 @@ public final class SpigotUpdateChecker {
     /** The newest version seen, or {@code null} if no check has succeeded yet. */
     public String latestVersion() {
         return latest.get();
+    }
+
+    /** The version this proxy is actually running. */
+    public String currentVersion() {
+        return currentVersion;
     }
 
     public boolean updateAvailable() {
@@ -72,16 +88,32 @@ public final class SpigotUpdateChecker {
                         return;
                     }
                     latest.set(remote);
-                    if (isNewer(remote, currentVersion)) {
-                        logger.info("{} {} is available (running {}). Download: "
-                                        + "https://www.spigotmc.org/resources/{}/",
-                                pluginName, remote, currentVersion, resourceId);
-                    }
+                    report(remote);
                 })
                 .exceptionally(error -> {
                     logger.debug("Update check failed: {}", error.getMessage());
                     return null;
                 });
+    }
+
+    /**
+     * Says what is running and what is available.
+     *
+     * <p>Both numbers appear in both cases. An operator reading a log weeks later
+     * should not have to work out which version was in use at the time, and a
+     * line that only names the new version leaves exactly that gap.
+     */
+    private void report(String remote) {
+        if (isNewer(remote, currentVersion)) {
+            logger.info("{}: running version {}, newest version {} is available. Download: "
+                            + "https://www.spigotmc.org/resources/{}/",
+                    pluginName, currentVersion, remote, resourceId);
+            return;
+        }
+        if (announcedUpToDate.compareAndSet(false, true)) {
+            logger.info("{}: running version {}, newest version {}. You are up to date.",
+                    pluginName, currentVersion, remote);
+        }
     }
 
     /**
